@@ -1,16 +1,232 @@
 version: 2.1
-jobs:
-  build:
+aliases:
+  - &init_container
+    working_directory: ~/repo
     docker:
-      - image: dannydainton/htmlextra
+      - image: circleci/golang:1.14
+    resource_class: large
+orbs:
+  aws-cli: circleci/aws-cli@1.1.0
+  sonarcloud: sonarsource/sonarcloud@1.0.1
+  dynamo-lock: gastfreund/dynamo-lock@1.0.1
+  
+
+commands:
+  load_context:
     steps:
       - checkout
+      - restore_cache:
+          name: Restore Go Package Cache
+          keys:
+            - go-mod-v1-{{ checksum "go.sum" }}
+      - attach_workspace:
+          at: /home/circleci
+  ##############
+  save_context:
+    steps:
+      - save_cache:
+          key: go-mod-v1-{{ checksum "go.sum" }}
+          paths:
+            - "/go/pkg/mod/cache"
+      - persist_to_workspace:
+          root: /home/circleci/
+          paths:
+            - .pulumi/
+            - repo/bin/
+  ##############
+  deploy_pulumi_stack:
+    parameters:
+      env:
+        type: string
+      stack_name:
+        type: string
+      path:
+        type: string
+      service:
+        type: boolean
+        default: true
+    steps:
       - run:
-         command: |
-           mkdir -p ~/test-results/newman
-           pwd
-           ls -lhrt
-           newman run ./integration_test/config_service/Discovery_Config_Service_Automation.postman_collection.json -e ./integration_test/config_service/Discovery_ENV_Staging.postman_environment.json -r cli,htmlextra
-           cp ./newman/*.html ~/test-results/newman/
-      - store_artifacts:
-          path: ~/test-results/newman
+          name: Login to Pulumi
+          command: |
+            echo "export PATH=${HOME}/.pulumi/bin:$PATH" >> $BASH_ENV
+            source $BASH_ENV
+            pulumi login --cloud-url s3://<<parameters.env>>-reco-pulumi-states
+      - when:
+          condition: <<parameters.service>>
+          steps:
+            - setup_remote_docker:
+                docker_layer_caching: true
+            - run:
+                name: Building Go <<parameters.path>> service
+                command: GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o <<parameters.path>>main <<parameters.path>>main.go
+      - dynamo-lock/setup:
+          branches: .
+      - dynamo-lock/lock:
+          branches: .
+          table: reco-pulumi-locks
+          lock_name: <<parameters.env>>-<<parameters.stack_name>>
+          ttl: 3600
+      - run:
+          name: Deploy <<parameters.stack_name>> Stack (if changed)
+          command: pulumi up --skip-preview --stack <<parameters.env>>-<<parameters.stack_name>> --cwd <<parameters.path>> --yes
+      - dynamo-lock/unlock:
+          branches: .
+          table: reco-pulumi-locks
+          lock_name: <<parameters.env>>-<<parameters.stack_name>>
+      - dynamo-lock/unlock-on-fail:
+          branches: .
+          table: reco-pulumi-locks
+          lock_name: <<parameters.env>>-<<parameters.stack_name>>
+
+jobs:
+  dependencies:
+    <<: *init_container
+    steps:
+      - checkout
+      - aws-cli/setup:
+          profile-name: test
+          skip-install-check: false
+      - run:
+          name: Install Pulumi
+          command: curl -sSL https://get.pulumi.com | bash -s -- --version 2.7.1
+      - run:
+          name: Pulumi install resources
+          command: |
+            echo "export PATH=${HOME}/.pulumi/bin:$PATH" >> $BASH_ENV
+            source $BASH_ENV
+            pulumi plugin install resource aws v1.30.0
+            pulumi plugin install resource datadog v1.3.0
+      - run:
+          name: Install Go dependencies
+          command: go mod download
+      - run:
+          name: Install Go Linter
+          command: curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s v1.27.0
+      - save_context
+
+  run_lint:
+    <<: *init_container
+    environment:
+      GOGC: 10
+    steps:
+      - load_context
+      - run:
+          name: Run Linter
+          command: ./bin/golangci-lint run --timeout=5m
+
+  test_and_analyze:
+    <<: *init_container
+    environment:
+      GOGC: 20
+    steps:
+      - load_context
+      - run:
+          name: Run tests and generate coverage information
+          command: |
+            echo "Uncomment these lines"
+            go test -timeout 300s -cover -coverprofile coverage.out ./...
+            go test -timeout 300s -json ./... > report.json
+      - sonarcloud/scan
+
+  deploy_pulumi_stack_job:
+    <<: *init_container
+    description: Deploying a generic Pulumi stack
+    parameters:
+      env:
+        type: string
+      stack_name:
+        type: string
+      path:
+        type: string
+      service:
+        type: boolean
+        default: true
+    steps:
+      - load_context
+      - deploy_pulumi_stack:
+          env: <<parameters.env>>
+          stack_name: <<parameters.stack_name>>
+          path: <<parameters.path>>
+          service: <<parameters.service>>
+
+workflows:
+  version: 2
+  build_test_deploy:
+    jobs:
+      - dependencies
+      - test_and_analyze:
+          context: reco-sonarcloud
+          requires:
+            - dependencies
+      - run_lint:
+          requires:
+            - dependencies
+      # Dev deployment
+      - deploy_pulumi_stack_job:
+          name: CoreInfra dev deployment
+          env: dev
+          stack_name: infra
+          path: infra/
+          service: false
+          requires:
+            - run_lint
+            - test_and_analyze
+          filters:
+            branches:
+              ignore: master
+      - deploy_pulumi_stack_job:
+          name: Recommendations RPC Service - dev deployment
+          env: dev
+          stack_name: rpcms
+          path: services/rpcms/
+          requires:
+            - Runtime Plugin for Amazon Personalize - dev deployment
+      - deploy_pulumi_stack_job:
+          name: Runtime Plugin for Amazon Personalize - dev deployment
+          env: dev
+          stack_name: rtpluginap
+          path: services/rtpluginap/
+          requires:
+            - CoreInfra dev deployment
+      - deploy_pulumi_stack_job:
+          name: Configuration Service - dev deployment
+          env: dev
+          stack_name: configms
+          path: services/configms/
+          requires:
+            - CoreInfra dev deployment
+      # stage deployment
+      - deploy_pulumi_stack_job:
+          name: CoreInfra stage deployment
+          env: stage
+          stack_name: infra
+          path: infra/
+          service: false
+          requires:
+            - run_lint
+            - test_and_analyze
+          filters:
+            branches:
+              only: master
+      - deploy_pulumi_stack_job:
+          name: Recommendations RPC Service - stage deployment
+          env: stage
+          stack_name: rpcms
+          path: services/rpcms/
+          requires:
+            - Runtime Plugin for Amazon Personalize - stage deployment
+      - deploy_pulumi_stack_job:
+          name: Runtime Plugin for Amazon Personalize - stage deployment
+          env: stage
+          stack_name: rtpluginap
+          path: services/rtpluginap/
+          requires:
+            - CoreInfra stage deployment
+      - deploy_pulumi_stack_job:
+          name: Configuration Service - stage deployment
+          env: stage
+          stack_name: configms
+          path: services/configms/
+          requires:
+            - CoreInfra stage deployment
