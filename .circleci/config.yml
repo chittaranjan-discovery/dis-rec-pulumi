@@ -22,6 +22,17 @@ commands:
       - attach_workspace:
           at: /home/circleci
   ##############
+jobs:
+  build:
+    docker:
+      - image: dannydainton/htmlextra
+    steps:
+      - checkout
+      - run:
+         command: |
+           newman run ./integration_test/config_service/Discovery_Config_Service_Automation.postman_collection.json -e ./integration_test/config_service/Discovery_ENV_Staging.postman_environment.json -r cli,htmlextra
+
+
   save_context:
     steps:
       - save_cache:
