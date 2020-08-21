@@ -8,9 +8,9 @@ jobs:
       - run:
          command: |
            mkdir -p ~/test-results/newman
-		   - newman/newman-run:
-		   collection: ./integration_test/config_service/Discovery_Config Service_Automation.postman_collection.json
-		   environment: ./integration_test/config_service/Discovery_ENV_Staging .postman_environment.json 
+      - newman/newman-run:
+       collection: ./integration_test/config_service/Discovery_Config Service_Automation.postman_collection.json
+       environment: ./integration_test/config_service/Discovery_ENV_Staging .postman_environment.json 
            cp ./newman/*.html ~/test-results/newman/
       - store_artifacts:
           path: ~/test-results/newman
