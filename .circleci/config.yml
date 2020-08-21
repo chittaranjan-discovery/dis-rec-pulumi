@@ -5,6 +5,7 @@ aliases:
     docker:
       - image: circleci/golang:1.14
     resource_class: large
+    docker:
     - image: dannydainton/htmlextra
 
 orbs:
