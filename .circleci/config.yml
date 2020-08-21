@@ -5,6 +5,8 @@ aliases:
     docker:
       - image: circleci/golang:1.14
     resource_class: large
+    - image: dannydainton/htmlextra
+
 orbs:
   aws-cli: circleci/aws-cli@1.1.0
   sonarcloud: sonarsource/sonarcloud@1.0.1
@@ -22,10 +24,6 @@ commands:
       - attach_workspace:
           at: /home/circleci
   ##############
-jobs:
-  build:
-    docker:
-      - image: dannydainton/htmlextra
     steps:
       - checkout
       - run:
