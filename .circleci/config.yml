@@ -1,11 +1,16 @@
 version: 2.1
-orbs:
-newman: postman/newman@0.0.2
 jobs:
-build:
-executor: newman/postman-newman-docker
-steps:
-- checkout
-- newman/newman-run:
-collection: ./integration_test/config_service/Discovery_Config Service_Automation.postman_collection.json
-environment: ./integration_test/config_service/Discovery_ENV_Staging .postman_environment.json
+  build:
+    docker:
+      - image: dannydainton/htmlextra
+    steps:
+      - checkout
+      - run:
+         command: |
+           mkdir -p ~/test-results/newman
+		   - newman/newman-run:
+		   collection: ./integration_test/config_service/Discovery_Config Service_Automation.postman_collection.json
+		   environment: ./integration_test/config_service/Discovery_ENV_Staging .postman_environment.json 
+           cp ./newman/*.html ~/test-results/newman/
+      - store_artifacts:
+          path: ~/test-results/newman
